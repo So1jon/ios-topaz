@@ -13,3 +13,16 @@ diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
  
  #define HAS_GIC_V3                1
  
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -10985,7 +10985,9 @@
+  * Ensure that 64-bit devices using 4K pages can nest the commpage completely
+  * above the maximum userspace VA.
+  */
++#if !defined(XNU_PLATFORM_MacOSX) && !defined(XNU_PLATFORM_DriverKit)
+ static_assert((_COMM_PAGE64_BASE_ADDRESS & ~ARM_TT_L1_OFFMASK) >= MACH_VM_MAX_ADDRESS);
++#endif /* EXPERIMENT 4k: like 16K on macOS, the VM reserves the commpage region */
+ #else
+ #error Nested shared page mapping is unsupported on this config
+ #endif
