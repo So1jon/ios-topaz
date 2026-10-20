@@ -1,0 +1,13 @@
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -10891,7 +10891,8 @@
+ 	vm_map_address_t commpage_text_va = 0;
+ 
+ 	do {
+-		int text_leaf_index = random() % num_ptes;
++		/* EXPERIMENT 4k: with 16K VM pages on 4K hardware pages the PFZ page must be 16K aligned */
++		int text_leaf_index = (random() % (num_ptes / 4)) * 4;
+ 
+ 		// Generate a VA for the commpage text with the same root and twig index as data
+ 		// comm page, but with new leaf index we've just generated.
