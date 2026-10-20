@@ -110,3 +110,17 @@ diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
  	__asm__ volatile("dsb ishst" ::: "memory");
  }
  #endif
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -542,9 +542,7 @@
+ 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
+ 	kprintf("kprintf initialized\n");
+ 	sweet_early_mark(20, "kprintf startup complete");
+-	if (serial_exists) {
+-		sweet_early_disable();
+-	}
++	/* EXPERIMENT 4k: keep the early screen console alive so panics stay visible */
+ 
+ 	serialmode = 0;
+ 	if (PE_parse_boot_argn("serial", &serialmode, sizeof(serialmode))) {
