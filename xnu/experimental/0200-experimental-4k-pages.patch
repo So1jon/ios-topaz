@@ -26,3 +26,17 @@ diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
  #else
  #error Nested shared page mapping is unsupported on this config
  #endif
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -333,7 +333,9 @@
+ ARM64_LINK_ADDR    =0xfffffff007004000
+ 
+ # Use ARM_LARGE_MEMORY config for all MacOSX targets.
+-ifneq ($(filter $(PLATFORM),MacOSX),)
++# EXPERIMENT 4k: the large-memory layout (41-bit kernel VA, T1SZ 17) needs 16K
++# pages; 4K uses T1SZ 25, so keep the 37-bit layout at 0xfffffff007004000.
++ifneq ($(filter $(PLATFORM),MacOSX-large-memory-disabled-for-4k),)
+ LARGE_MEMORY_DEFINE=-DARM_LARGE_MEMORY=1
+ ARM64_PLKSEG_ADDR  =0xfffffe0004004000
+ ARM64_LINK_ADDR    =0xfffffe0007004000
