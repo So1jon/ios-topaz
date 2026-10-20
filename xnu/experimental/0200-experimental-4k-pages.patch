@@ -137,3 +137,25 @@ diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
  #define ZONE_MAP_MAX            (32ULL << 30)
  #define ZONE_MAP_VA_SIZE        (128ULL << 30)
  #else /* XNU_PLATFORM_MacOSX */
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -122,6 +122,18 @@
+ 	_doprnt(fmt, &copy, sweet_early_putc, 16);
+ 	va_end(copy);
+ 	sweet_early_putc('\n');
++	/* EXPERIMENT 4k: frame-pointer backtrace (low 40 bits of each return address) */
++	sweet_early_string("BT:");
++	uintptr_t *fp = (uintptr_t *)__builtin_frame_address(0);
++	for (int i = 0; i < 16 && fp && (((uintptr_t)fp & 7) == 0) && (uintptr_t)fp > 0xfffffff000000000ULL; i++) {
++		uintptr_t lr = fp[1];
++		sweet_early_putc(' ');
++		for (int sh = 36; sh >= 0; sh -= 4) {
++			sweet_early_putc("0123456789abcdef"[(lr >> sh) & 0xf]);
++		}
++		fp = (uintptr_t *)fp[0];
++	}
++	sweet_early_putc('\n');
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
