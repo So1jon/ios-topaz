@@ -1,0 +1,13 @@
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -148,7 +148,8 @@
+ 	 * topaz: the ADT lists only the A73 (gold) cores and the shim boots xnu
+ 	 * on gold CPU 0x100 (the silver cluster has no 16K granule).
+ 	 */
+-	if (topology->boot_cpu->cpu_id != 0 || topology->boot_cpu->phys_id != 0x100) {
++	/* EXPERIMENT 4k: A53-only SoCs / QEMU boot on MPIDR 0 */
++	if (topology->boot_cpu->cpu_id != 0 || (topology->boot_cpu->phys_id != 0x100 && topology->boot_cpu->phys_id != 0)) {
+ 		panic("SWEET CPU: expected boot MPIDR 0x100 and logical CPU 0, got 0x%x/%u",
+ 		    topology->boot_cpu->phys_id, topology->boot_cpu->cpu_id);
+ 	}
