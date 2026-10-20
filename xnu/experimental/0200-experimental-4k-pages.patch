@@ -1,0 +1,15 @@
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -35,7 +35,10 @@
+ #define __ARM_ENABLE_SWAP__       1
+ #define __ARM_V8_CRYPTO_EXTENSIONS__ 1
+ /* topaz: Cortex-A53/A73 have no PAN (ARMv8.1); MSR PAN is undefined there */
+-#define __ARM_16K_PG__            1
++/* EXPERIMENT (page_size=4k): 4K translation granule so Cortex-A53-only SoCs
++ * (Exynos 7870, ...) can run xnu. Leaving __ARM_16K_PG__ undefined selects
++ * ARM_PGSHIFT 12, like xnu's own BCM2837 (Raspberry Pi 3) config. */
++/* #define __ARM_16K_PG__ 1 */
+ 
+ #define HAS_GIC_V3                1
+ 
