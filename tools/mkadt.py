@@ -42,6 +42,17 @@ QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
 QEMU_VTIMER_INTID = 27
 # --gicv2 (QEMU virt gic-version=2): GICD stays 0x08000000, GICC at 0x08010000
 QEMU_GICC, QEMU_GICC_SIZE = 0x08010000, 0x10000
+# --exynos7870: Samsung Exynos 7870 (Galaxy A6/J6 ...). Values from mainline Linux
+# arch/arm64/boot/dts/exynos/exynos7870.dtsi and exynos7870-j6lte.dts. The DRAM bank and the
+# framebuffer are the J6 board's: NOT yet verified for the A6 (EXYBASE / EXYSIZE override DRAM).
+EXY_GICD, EXY_GICD_SIZE = 0x104e1000, 0x1000
+EXY_GICC, EXY_GICC_SIZE = 0x104e2000, 0x2000      # GIC-400 CPU interface is 8 KiB
+EXY_TIMEBASE = 26000000                            # stock bootloader leaves CNTFRQ_EL0 unset
+EXY_MPIDRS = (0x0, 0x1, 0x2, 0x3, 0x100, 0x101, 0x102, 0x103)   # two clusters of four A53
+EXY_FB, EXY_FB_W, EXY_FB_H = 0x67000000, 720, 1480
+EXY_FB_SIZE = (EXY_FB_W * EXY_FB_H * 4 + 0xffff) & ~0xffff
+EXY_DRAM_BASE = int(os.environ.get('EXYBASE', '0x80000000'), 16)
+EXY_DRAM_SIZE = int(os.environ.get('EXYSIZE', '0x40000000'), 16)   # 4K xnu needs <= ~1.25 GB
 
 BOOT_MANIFEST_HASH = hashlib.sha384(b'topaz boot manifest').digest()
 
@@ -78,12 +89,22 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, gicv2=False):
+def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, gicv2=False, exynos=False):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
     phys_base, mem_size = ((MID_PHYS_BASE, MID_MEM_SIZE) if midmem else
                            (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE))
     gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
     gicc, gicc_size = QEMU_GICC, QEMU_GICC_SIZE   # gicv2: second reg pair = GICC (CPU interface)
+    fb, fb_size, fb_w, fb_h = FB, FB_SIZE, FB_W, FB_H
+    fb_stride = fb_w * 4
+    vtimer = QEMU_VTIMER_INTID if qemu else VTIMER_INTID
+    if exynos:
+        assert not qemu
+        phys_base, mem_size = EXY_DRAM_BASE, EXY_DRAM_SIZE
+        gicd, gicc, gicc_size, timebase, gicv2 = EXY_GICD, EXY_GICC, EXY_GICC_SIZE, EXY_TIMEBASE, True
+        fb, fb_size, fb_w, fb_h = EXY_FB, EXY_FB_SIZE, EXY_FB_W, EXY_FB_H
+        fb_stride = fb_w * 4
+        vtimer = 27                                # architected virtual timer PPI 11
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
@@ -137,17 +158,17 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, gicv
     # and uses cpus=N to select an initial prefix (N <= 8).
     # QEMU retains its original single-CPU tree: its MPIDRs differ from sweet.
     cpu_nodes = []
-    for core in range(1 if qemu else 4):
+    for core in range(1 if qemu else 8 if exynos else 4):
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
             ('compatible', cstr('qcom,kryo260') + cstr('qcom,kryo470') + cstr('ARM,v8')),
-            ('reg', u32(core if qemu else 0x100 | core)),  # actual MPIDR Aff1:Aff0, NOT logical ID
+            ('reg', u32(EXY_MPIDRS[core] if exynos else core if qemu else 0x100 | core)),  # actual MPIDR Aff1:Aff0, NOT logical ID
             ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
-            ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
+            ('cluster-id', u32(core // 4 if exynos else 0)),  # descriptive; see ml_parse_cpu_topology
             ('cluster-type', u32(0)),  # homogeneous CLUSTER_TYPE_SMP, not AMP
             ('die-cluster-id', u32(0)),
-            ('cluster-core-id', u32(core)),
+            ('cluster-core-id', u32(core % 4 if exynos else core)),
             ('l2-cache-id', u32(0)),  # gold L2
             ('l3-cache-id', u32(0)),
             ('state', cstr('running' if core == 0 else 'stopped')),
@@ -165,7 +186,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, gicv
         ph(),
         ('compatible', cstr('arm,gic-400' if gicv2 else 'arm,gic-v3')),
         ('interrupt-controller', b''),
-        ('virtual-timer-intid', u32(QEMU_VTIMER_INTID if qemu else VTIMER_INTID)),
+        ('virtual-timer-intid', u32(vtimer)),
         ('reg', u64(gicd - SOC_BASE, GICD_SIZE, gicc - SOC_BASE, gicc_size) if gicv2 else
                     u64(gicd - SOC_BASE, GICD_SIZE, gicr - SOC_BASE, GICR_SIZE)),
     ])
@@ -198,10 +219,10 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, gicv
 
     fbcon = node('sweet-fbcon', [
         ph(),
-        ('reg', u64(FB, FB_SIZE)),
-        ('width', u32(FB_W)),
-        ('height', u32(FB_H)),
-        ('stride', u32(FB_STRIDE)),
+        ('reg', u64(fb, fb_size)),
+        ('width', u32(fb_w)),
+        ('height', u32(fb_h)),
+        ('stride', u32(fb_stride)),
     ])
 
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
@@ -242,13 +263,13 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, gicv
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if (qemu or exynos) else [ufs]))
 
 
 if __name__ == '__main__':
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
                  native='--native' in sys.argv, midmem='--midmem' in sys.argv,
-                 gicv2='--gicv2' in sys.argv)
+                 gicv2='--gicv2' in sys.argv, exynos='--exynos7870' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
