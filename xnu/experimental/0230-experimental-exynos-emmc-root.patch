@@ -531,7 +531,7 @@ diff --git a/bsd/dev/sweet_emmc.c b/bsd/dev/sweet_emmc.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/sweet_emmc.c
-@@ -0,0 +1,370 @@
+@@ -0,0 +1,372 @@
 +/*
 + * SWEET eMMC root device (read-only), Exynos 7870 / Galaxy A6.
 + *
@@ -728,6 +728,8 @@ new file mode 100644
 +		return 0;
 +	case DKIOCGETBLOCKCOUNT:
 +		*o = se.nsect * SE_SECTOR / se.secsize;
++		return 0;
++	case DKIOCSYNCHRONIZE:		/* HFS flushes after journal writes; nothing is cached below the overlay */
 +		return 0;
 +	case DKIOCISWRITABLE:
 +		*f = se.cow;

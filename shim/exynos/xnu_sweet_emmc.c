@@ -195,6 +195,8 @@ sweet_emmc_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag
 	case DKIOCGETBLOCKCOUNT:
 		*o = se.nsect * SE_SECTOR / se.secsize;
 		return 0;
+	case DKIOCSYNCHRONIZE:		/* HFS flushes after journal writes; nothing is cached below the overlay */
+		return 0;
 	case DKIOCISWRITABLE:
 		*f = se.cow;
 		return 0;
