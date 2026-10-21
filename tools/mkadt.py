@@ -53,6 +53,7 @@ EXY_GICC, EXY_GICC_SIZE = 0x104e2000, 0x2000      # GIC-400 CPU interface is 8 K
 EXY_TIMEBASE = 26000000                            # stock bootloader leaves CNTFRQ_EL0 unset
 EXY_MPIDRS = (0x0, 0x1, 0x2, 0x3, 0x100, 0x101, 0x102, 0x103)   # two clusters of four A53
 EXY_FB, EXY_FB_W, EXY_FB_H = 0x67000000, 720, 1480
+EXY_EMMC, EXY_EMMC_SIZE = 0x13540000, 0x2000      # dwmmc0@13540000 (confirmed on the A6)
 EXY_FB_SIZE = 0xA00000      # bootloader_fb in Samsung's A6 dts: <0x67000000 0xA00000>
 EXY_DRAM_BASE = int(os.environ.get('EXYBASE', '0xa0000000'), 16)   # free of every A6 carve-out (see below)
 EXY_DRAM_SIZE = int(os.environ.get('EXYSIZE', '0x4d000000'), 16)   # 1.2 GB: 4K xnu needs <= ~1.25 GB
@@ -235,6 +236,15 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, gicv
         ('reg', u64(UFS, UFS_SIZE)),
     ])
 
+    # bsd/dev/sweet_emmc.c (rd=emmcroot0): DW-MSHC eMMC host the bootloader left running. exynos: always;
+    # any other mode only if SWEET_EMMC_PA is set (QEMU error-path test: the address is unmapped there).
+    emmc_pa = int(os.environ['SWEET_EMMC_PA'], 16) if os.environ.get('SWEET_EMMC_PA') else (EXY_EMMC if exynos else None)
+    emmc = node('sweet-emmc', [
+        ph(),
+        ('compatible', cstr('samsung,exynos-dw-mshc')),
+        ('reg', u64(emmc_pa, EXY_EMMC_SIZE)),
+    ]) if emmc_pa else None
+
     # pmap_compute_max_asids requires the node even when no overrides are set.
     # An absent pmap-max-asids property selects XNU's own MAX_ASIDS default.
     # No effaceable storage: keybagd then reads /private/var/keybags/systembag.kb
@@ -266,7 +276,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, gicv
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if (qemu or exynos) else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if (qemu or exynos) else [ufs]) + ([emmc] if emmc else []))
 
 
 if __name__ == '__main__':

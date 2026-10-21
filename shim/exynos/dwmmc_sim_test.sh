@@ -3,5 +3,5 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 OUT=${TMPDIR:-/tmp}/dwmmc_sim_test
-cc -O1 -Wall -Wextra -DDWMMC_SIM -I. dwmmc.c dwmmc_sim_test.c -o "$OUT"
+cc -O1 -Wall -Wextra -DDWMMC_SIM -I. dwmmc.c gpt.c dwmmc_sim_test.c -o "$OUT"
 "$OUT"

@@ -1,0 +1,699 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -106,6 +106,9 @@
+ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
+ bsd/dev/sweet_vblk.c			standard
++bsd/dev/sweet_emmc.c			standard
++bsd/dev/sweet_dwmmc.c			standard
++bsd/dev/sweet_gpt.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -770,6 +770,18 @@
+ //
+ //	SWEET: root on a GPT partition of the internal UFS (bsd/dev/sweet_ufs.c)
+ //
++	if (strcmp(rdBootVar, "emmcroot0") == 0) {
++		extern int sweet_emmc_rootdev(dev_t *dev);
++		OSSafeReleaseNULL(matching);
++		int em_error = sweet_emmc_rootdev(root);
++		if (em_error) {
++			panic("IOFindBSDRoot: SWEET eMMC root %s unavailable: %d", rdBootVar, em_error);
++		}
++		strlcpy(rootName, rdBootVar, rootNameSize);
++		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++		*oflags = 0;
++		goto iofrootx;
++	}
+ 	if (strcmp(rdBootVar, "vblk0") == 0) {
+ 		extern int sweet_vblk_rootdev(dev_t *dev);
+ 		OSSafeReleaseNULL(matching);
+diff --git a/bsd/dev/sweet_dwmmc.h b/bsd/dev/sweet_dwmmc.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_dwmmc.h
+@@ -0,0 +1,58 @@
++#pragma once
++/*
++ * Read-only polled driver for the Synopsys DesignWare Mobile Storage host (DW-MSHC) that Exynos 7870
++ * uses for eMMC (mmc0 @ 0x13540000 in mainline Linux). It TAKES OVER the state the bootloader left
++ * (clocks, bus width, timing, card selected): it never touches clocks, pinmux, power or the card
++ * configuration, and it never writes to the card. PIO through the FIFO, no DMA/IDMAC, so the
++ * Exynos "SMU" address translation does not matter.
++ *
++ * Untested on hardware: first use is shim/exynos/probe_main.c (prints, writes nothing to storage).
++ */
++#include <stdint.h>
++
++#define DWMMC_ETIMEOUT	(-1)	/* no response / controller stuck */
++#define DWMMC_ECMD	(-2)	/* response error or CRC error */
++#define DWMMC_EDATA	(-3)	/* data timeout, CRC, start/end bit or short transfer */
++#define DWMMC_EARG	(-4)
++
++struct dwmmc {
++	uintptr_t base;
++	uint32_t data_off;	/* FIFO port offset: 0x100 before VERID 0x240a, 0x200 from then on */
++	uint32_t rca;		/* relative card address; the bootloader normally leaves 1 */
++	uint32_t hold;		/* extra CMD flag: USE_HOLD_REG (needed in high-speed timings) */
++	uint32_t rintsts;	/* RINTSTS seen at the end of the last command / transfer */
++};
++
++/* Reads VERID, picks the FIFO port offset. No writes. */
++int dwmmc_init(struct dwmmc *h, uintptr_t base);
++/* CMD13: raw card status (R1). State is bits [12:9]: 3 = stby, 4 = tran. */
++int dwmmc_card_status(struct dwmmc *h, uint32_t *status);
++/* CMD7 with the RCA: select the card (stby -> tran). */
++int dwmmc_select(struct dwmmc *h);
++/* Read nsect 512-byte sectors starting at lba (high-capacity addressing). */
++int dwmmc_read(struct dwmmc *h, uint64_t lba, uint32_t nsect, void *buf);
++
++/* register offsets, for diagnostics */
++#define DW_CTRL		0x00
++#define DW_PWREN	0x04
++#define DW_CLKDIV	0x08
++#define DW_CLKSRC	0x0c
++#define DW_CLKENA	0x10
++#define DW_TMOUT	0x14
++#define DW_CTYPE	0x18
++#define DW_BLKSIZ	0x1c
++#define DW_BYTCNT	0x20
++#define DW_INTMASK	0x24
++#define DW_CMDARG	0x28
++#define DW_CMD		0x2c
++#define DW_RESP0	0x30
++#define DW_RINTSTS	0x44
++#define DW_STATUS	0x48
++#define DW_FIFOTH	0x4c
++#define DW_CDETECT	0x50
++#define DW_VERID	0x6c
++#define DW_HCON		0x70
++#define DW_UHS		0x74
++#define DW_BMOD		0x80
++
++uint32_t dwmmc_reg(struct dwmmc *h, uint32_t off);
+diff --git a/bsd/dev/sweet_dwmmc.c b/bsd/dev/sweet_dwmmc.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_dwmmc.c
+@@ -0,0 +1,189 @@
++/*
++ * Read-only polled DW-MSHC driver, see dwmmc.h. Register layout: Synopsys DWC_mobile_storage databook
++ * as implemented by Linux drivers/mmc/host/dw_mmc.c.
++ */
++#include "sweet_dwmmc.h"
++
++#ifdef DWMMC_SIM
++extern uint32_t sim_rd(uintptr_t addr);
++extern void sim_wr(uintptr_t addr, uint32_t v);
++#define RD(h, off)	sim_rd((h)->base + (off))
++#define WR(h, off, v)	sim_wr((h)->base + (off), (v))
++#else
++#define RD(h, off)	(*(volatile uint32_t *)((h)->base + (off)))
++#define WR(h, off, v)	(*(volatile uint32_t *)((h)->base + (off)) = (v))
++#endif
++
++/* CTRL */
++#define CTRL_FIFO_RESET		(1u << 1)
++#define CTRL_DMA_RESET		(1u << 2)
++#define CTRL_INT_ENABLE		(1u << 4)
++#define CTRL_DMA_ENABLE		(1u << 5)
++#define CTRL_USE_IDMAC		(1u << 25)
++/* CMD */
++#define CMD_START		(1u << 31)
++#define CMD_USE_HOLD_REG	(1u << 29)
++#define CMD_WAIT_PRVDATA	(1u << 13)
++#define CMD_SEND_AUTO_STOP	(1u << 12)
++#define CMD_DATA_EXPECT		(1u << 9)
++#define CMD_CHECK_RESP_CRC	(1u << 8)
++#define CMD_RESP_EXPECT		(1u << 6)
++/* RINTSTS */
++#define INT_CD			(1u << 0)
++#define INT_RE			(1u << 1)
++#define INT_DTO			(1u << 3)
++#define INT_RXDR		(1u << 5)
++#define INT_RCRC		(1u << 6)
++#define INT_DCRC		(1u << 7)
++#define INT_RTO			(1u << 8)
++#define INT_DRTO		(1u << 9)
++#define INT_HLE			(1u << 12)
++#define INT_SBE			(1u << 13)
++#define INT_EBE			(1u << 15)
++/* STATUS */
++#define ST_DATA_BUSY		(1u << 9)
++
++#define SPIN_CMD		2000000u
++#define SPIN_DATA		60000000u
++
++uint32_t dwmmc_reg(struct dwmmc *h, uint32_t off)
++{
++	return RD(h, off);
++}
++
++int dwmmc_init(struct dwmmc *h, uintptr_t base)
++{
++	h->base = base;
++	uint32_t ver = RD(h, DW_VERID);
++	h->data_off = (ver & 0xffff) >= 0x240a ? 0x200 : 0x100;
++	h->rca = 1;
++	h->hold = 0;
++	h->rintsts = 0;
++	return 0;
++}
++
++static int wait_idle(struct dwmmc *h)
++{
++	for (uint32_t i = 0; i < SPIN_CMD; i++)
++		if (!(RD(h, DW_STATUS) & ST_DATA_BUSY))
++			return 0;
++	return DWMMC_ETIMEOUT;
++}
++
++/* PIO only: no IDMAC, no DMA interface, no interrupts, FIFO empty. Touches nothing else. */
++static void prepare_pio(struct dwmmc *h)
++{
++	uint32_t ctrl = RD(h, DW_CTRL);
++	ctrl &= ~(CTRL_USE_IDMAC | CTRL_DMA_ENABLE | CTRL_INT_ENABLE);
++	WR(h, DW_CTRL, ctrl | CTRL_FIFO_RESET | CTRL_DMA_RESET);
++	for (uint32_t i = 0; i < SPIN_CMD; i++)
++		if (!(RD(h, DW_CTRL) & (CTRL_FIFO_RESET | CTRL_DMA_RESET)))
++			break;
++	WR(h, DW_INTMASK, 0);
++	WR(h, DW_RINTSTS, 0xffffffffu);
++}
++
++/* Issue one command and wait for it to be accepted and answered; RINTSTS is left for the caller. */
++static int send(struct dwmmc *h, uint32_t idx, uint32_t arg, uint32_t flags)
++{
++	int e = wait_idle(h);
++	if (e)
++		return e;
++	WR(h, DW_RINTSTS, 0xffffffffu);
++	WR(h, DW_CMDARG, arg);
++	WR(h, DW_CMD, CMD_START | (h->hold ? CMD_USE_HOLD_REG : 0) | flags | (idx & 0x3f));
++	uint32_t i;
++	for (i = 0; i < SPIN_CMD; i++)
++		if (!(RD(h, DW_CMD) & CMD_START))
++			break;
++	if (i == SPIN_CMD)
++		return DWMMC_ETIMEOUT;
++	for (i = 0; i < SPIN_CMD; i++) {
++		uint32_t r = RD(h, DW_RINTSTS);
++		if (r & INT_HLE)
++			return DWMMC_ECMD;
++		if (r & INT_CD) {
++			h->rintsts = r;
++			if (r & INT_RTO)
++				return DWMMC_ETIMEOUT;
++			if (r & (INT_RE | INT_RCRC))
++				return DWMMC_ECMD;
++			return 0;
++		}
++	}
++	return DWMMC_ETIMEOUT;
++}
++
++int dwmmc_card_status(struct dwmmc *h, uint32_t *status)
++{
++	prepare_pio(h);
++	int e = send(h, 13, h->rca << 16, CMD_RESP_EXPECT | CMD_CHECK_RESP_CRC);
++	if (e)
++		return e;
++	*status = RD(h, DW_RESP0);
++	return 0;
++}
++
++int dwmmc_select(struct dwmmc *h)
++{
++	prepare_pio(h);
++	return send(h, 7, h->rca << 16, CMD_RESP_EXPECT | CMD_CHECK_RESP_CRC);
++}
++
++static int fifo_count(struct dwmmc *h)
++{
++	return (int)((RD(h, DW_STATUS) >> 17) & 0x1fff);
++}
++
++/* One command with a read data phase of nsect sectors (nsect <= 255). */
++static int read_chunk(struct dwmmc *h, uint64_t lba, uint32_t nsect, uint32_t *p)
++{
++	uint32_t words = nsect * 128, got = 0;
++
++	prepare_pio(h);
++	WR(h, DW_BLKSIZ, 512);
++	WR(h, DW_BYTCNT, nsect * 512);
++	int e = send(h, nsect == 1 ? 17 : 18, (uint32_t)lba,
++	    CMD_RESP_EXPECT | CMD_CHECK_RESP_CRC | CMD_DATA_EXPECT | CMD_WAIT_PRVDATA |
++	    (nsect > 1 ? CMD_SEND_AUTO_STOP : 0));
++	if (e)
++		return e;
++	uint32_t r = h->rintsts;
++	for (uint32_t spin = 0; spin < SPIN_DATA; spin++) {
++		r |= RD(h, DW_RINTSTS);
++		if (r & (INT_DCRC | INT_DRTO | INT_SBE | INT_EBE))
++			return DWMMC_EDATA;
++		if (r & (INT_RXDR | INT_DTO)) {
++			int n = fifo_count(h);
++			while (n-- > 0 && got < words)
++				p[got++] = RD(h, h->data_off);
++			WR(h, DW_RINTSTS, INT_RXDR);
++			r &= ~INT_RXDR;
++			if (r & INT_DTO) {
++				/* transfer over: whatever is still in the FIFO is the tail */
++				for (int k = fifo_count(h); k > 0 && got < words; k--)
++					p[got++] = RD(h, h->data_off);
++				return got == words ? 0 : DWMMC_EDATA;
++			}
++		}
++	}
++	return DWMMC_ETIMEOUT;
++}
++
++int dwmmc_read(struct dwmmc *h, uint64_t lba, uint32_t nsect, void *buf)
++{
++	uint32_t *p = buf;
++
++	if (!buf || !nsect || lba > 0xffffffffull)
++		return DWMMC_EARG;
++	while (nsect) {
++		uint32_t n = nsect > 64 ? 64 : nsect;
++		int e = read_chunk(h, lba, n, p);
++		if (e)
++			return e;
++		lba += n;
++		nsect -= n;
++		p += n * 128;
++	}
++	return 0;
++}
+diff --git a/bsd/dev/sweet_gpt.h b/bsd/dev/sweet_gpt.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_gpt.h
+@@ -0,0 +1,15 @@
++#pragma once
++/*
++ * Find a GPT partition by name through the read-only DW-MSHC driver. Portable: used by the shim probe,
++ * the host simulator test and (embedded by tools/mk_emmc_patch.py) the xnu eMMC root device.
++ */
++#include <stdint.h>
++#include "sweet_dwmmc.h"
++
++#define GPT_ENOGPT	(-10)	/* LBA 1 has no "EFI PART" signature */
++#define GPT_EBAD	(-11)	/* header values outside what this reader accepts */
++#define GPT_ENOTFOUND	(-12)	/* no partition with that name */
++
++/* Name match is ASCII, case-insensitive. On success first/last are the partition's LBA range (inclusive).
++ * nparts (optional) receives the number of non-empty entries seen up to the match. */
++int gpt_find(struct dwmmc *h, const char *name, uint64_t *first, uint64_t *last, uint32_t *nparts);
+diff --git a/bsd/dev/sweet_gpt.c b/bsd/dev/sweet_gpt.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_gpt.c
+@@ -0,0 +1,77 @@
++/* GPT partition lookup by name, see gpt.h. 512-byte logical sectors, 128-byte entries. */
++#include "sweet_gpt.h"
++
++static uint32_t le32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
++}
++
++static uint64_t le64(const uint8_t *p)
++{
++	return (uint64_t)le32(p) | (uint64_t)le32(p + 4) << 32;
++}
++
++static char fold(char c)
++{
++	return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
++}
++
++/* entry name is UTF-16LE at +56 (36 code units); compare its ASCII range with `want` */
++static int name_is(const uint8_t *e, const char *want)
++{
++	for (int i = 0; i < 36; i++) {
++		char a = (e[56 + i * 2 + 1] == 0) ? (char)e[56 + i * 2] : '?';
++		char w = want[i];
++		if (fold(a) != fold(w))
++			return 0;
++		if (!w)
++			return 1;
++	}
++	return want[36] == 0;
++}
++
++int gpt_find(struct dwmmc *h, const char *name, uint64_t *first, uint64_t *last, uint32_t *nparts)
++{
++	uint32_t sec[128];		/* 512 bytes, 4-byte aligned for the FIFO reads */
++	uint32_t buf[4 * 128];		/* 16 entries per read */
++	const uint8_t *s = (const uint8_t *)sec;
++	const uint8_t *b = (const uint8_t *)buf;
++	static const char sig[8] = { 'E', 'F', 'I', ' ', 'P', 'A', 'R', 'T' };
++	uint32_t used = 0;
++	int rc = dwmmc_read(h, 1, 1, sec);
++
++	if (rc)
++		return rc;
++	for (int i = 0; i < 8; i++)
++		if ((char)s[i] != sig[i])
++			return GPT_ENOGPT;
++	uint32_t nent = le32(s + 80), esz = le32(s + 84);
++	uint64_t elba = le64(s + 72);
++	if (esz != 128 || nent == 0 || nent > 1024 || elba < 2 || elba > 0xffff0000ull)
++		return GPT_EBAD;
++	for (uint32_t i = 0; i < nent; i += 16) {
++		rc = dwmmc_read(h, elba + i / 4, 4, buf);
++		if (rc)
++			return rc;
++		for (uint32_t j = 0; j < 16 && i + j < nent; j++) {
++			const uint8_t *e = b + j * 128;
++			int empty = 1;
++			for (int k = 0; k < 16; k++)
++				if (e[k])
++					empty = 0;
++			if (empty)
++				continue;
++			used++;
++			if (name_is(e, name)) {
++				*first = le64(e + 32);
++				*last = le64(e + 40);
++				if (nparts)
++					*nparts = used;
++				return (*first <= *last) ? 0 : GPT_EBAD;
++			}
++		}
++	}
++	if (nparts)
++		*nparts = used;
++	return GPT_ENOTFOUND;
++}
+diff --git a/bsd/dev/sweet_emmc.c b/bsd/dev/sweet_emmc.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/sweet_emmc.c
+@@ -0,0 +1,300 @@
++/*
++ * SWEET eMMC root device (read-only), Exynos 7870 / Galaxy A6.
++ *
++ * Not built by the shim: tools/mk_emmc_patch.py embeds this file (as bsd/dev/sweet_emmc.c) together with
++ * dwmmc.c and gpt.c into xnu/experimental/0230-experimental-exynos-emmc-root.patch.
++ *
++ * It reuses the state S-BOOT left on the DW-MSHC host (see dwmmc.h), finds one GPT partition by name
++ * (boot-arg emmcpart=, default USERDATA) and exposes it as the BSD disk emmcroot0 (remmcroot0) with
++ * 512-byte sectors. Root on it with rd=emmcroot0. It never writes: opens for writing and write
++ * requests fail with EROFS, so a bug here cannot damage the partition table (cf. RECOVERY.md of the
++ * Redmi port). The /sweet-emmc ADT node gives the controller base (tools/mkadt.py --exynos7870).
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/buf.h>
++#include <sys/conf.h>
++#include <sys/disk.h>
++#include <sys/errno.h>
++#include <sys/proc.h>
++#include <sys/uio.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/locks.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <libkern/libkern.h>
++#include "sweet_dwmmc.h"
++#include "sweet_gpt.h"
++
++/* osfmk/arm/machine_routines.h, not exported to the BSD layer */
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++#define SE_SECTOR	512u
++#define SE_BOUNCE_SECT	64u
++
++static struct {
++	struct dwmmc h;
++	uint64_t first, nsect;		/* partition, in 512-byte sectors */
++	uint32_t secsize;		/* logical sector size for the BSD layer */
++	int bmajor, cmajor;
++	dev_t bdev;
++	bool ready;
++} se;
++
++static uint32_t se_bounce[SE_BOUNCE_SECT * 128] __attribute__((aligned(64)));
++
++static LCK_GRP_DECLARE(sweet_emmc_grp, "sweet_emmc");
++static LCK_MTX_DECLARE(sweet_emmc_lock, &sweet_emmc_grp);
++
++static int
++sweet_emmc_open(__unused dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
++{
++	if (!se.ready) {
++		return ENXIO;
++	}
++	return (flags & FWRITE) ? EROFS : 0;
++}
++
++static int
++sweet_emmc_close(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
++{
++	return 0;
++}
++
++static void
++sweet_emmc_strategy(buf_t bp)
++{
++	int error = 0;
++	caddr_t vaddr = NULL;
++	uint64_t off = (uint64_t)buf_blkno(bp) * se.secsize;
++	uint32_t count = buf_count(bp);
++	uint64_t part_bytes = se.nsect * SE_SECTOR;
++
++	buf_setresid(bp, count);
++	if (!(buf_flags(bp) & B_READ)) {
++		error = EROFS;
++		goto done;
++	}
++	if (off > part_bytes || count > part_bytes - off) {
++		error = EINVAL;
++		goto done;
++	}
++	if (count == 0) {
++		goto done;
++	}
++	if (buf_map(bp, &vaddr)) {
++		error = EIO;
++		goto done;
++	}
++
++	lck_mtx_lock(&sweet_emmc_lock);
++	for (uint32_t done = 0; done < count;) {
++		uint64_t pos = off + done;
++		uint32_t skip = (uint32_t)(pos % SE_SECTOR);
++		uint32_t want = MIN(count - done, SE_BOUNCE_SECT * SE_SECTOR - skip);
++		uint32_t nsec = (skip + want + SE_SECTOR - 1) / SE_SECTOR;
++		int rc = dwmmc_read(&se.h, se.first + pos / SE_SECTOR, nsec, se_bounce);
++		if (rc) {
++			printf("SWEET EMMC: read error %d at sector %llu\n", rc, se.first + pos / SE_SECTOR);
++			error = EIO;
++			break;
++		}
++		memcpy(vaddr + done, (const uint8_t *)se_bounce + skip, want);
++		done += want;
++		buf_setresid(bp, count - done);
++	}
++	lck_mtx_unlock(&sweet_emmc_lock);
++	buf_unmap(bp);
++
++done:
++	if (error) {
++		buf_seterror(bp, error);
++	}
++	buf_biodone(bp);
++}
++
++static int
++sweet_emmc_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag,
++    __unused struct proc *p, int is_char)
++{
++	uint32_t *f = (uint32_t *)data;
++	uint64_t *o = (uint64_t *)data;
++
++	switch (cmd) {
++	case DKIOCGETBLOCKSIZE:
++		*f = se.secsize;
++		return 0;
++	case DKIOCSETBLOCKSIZE:
++		if (is_char) {
++			return ENODEV;
++		}
++		if (*f < DEV_BSIZE || *f > 4096 || (*f & (*f - 1))) {
++			return EINVAL;
++		}
++		se.secsize = *f;
++		return 0;
++	case DKIOCGETPHYSICALBLOCKSIZE:
++		*f = SE_SECTOR;
++		return 0;
++	case DKIOCGETBLOCKCOUNT:
++		*o = se.nsect * SE_SECTOR / se.secsize;
++		return 0;
++	case DKIOCISWRITABLE:
++		*f = 0;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTREAD:
++		*o = SE_BOUNCE_SECT * SE_SECTOR / se.secsize;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTWRITE:
++		*o = 0;
++		return 0;
++	case DKIOCGETMAXSEGMENTCOUNTREAD:
++	case DKIOCGETMAXSEGMENTCOUNTWRITE:
++		*o = 1;
++		return 0;
++	default:
++		return ENOTTY;
++	}
++}
++
++static int
++sweet_emmc_bioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return sweet_emmc_ioctl(dev, cmd, data, flag, p, 0);
++}
++
++static int
++sweet_emmc_cioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return sweet_emmc_ioctl(dev, cmd, data, flag, p, 1);
++}
++
++static int
++sweet_emmc_psize(__unused dev_t dev)
++{
++	return se.ready ? (int)MIN(se.nsect * SE_SECTOR / se.secsize, INT_MAX) : -1;
++}
++
++static int
++sweet_emmc_read(dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	return physio(sweet_emmc_strategy, NULL, dev, B_READ, minphys, uio, (int)se.secsize);
++}
++
++static int
++sweet_emmc_write(__unused dev_t dev, __unused struct uio *uio, __unused int ioflag)
++{
++	return EROFS;
++}
++
++static const struct bdevsw sweet_emmc_bdevsw = {
++	.d_open     = sweet_emmc_open,
++	.d_close    = sweet_emmc_close,
++	.d_strategy = sweet_emmc_strategy,
++	.d_ioctl    = sweet_emmc_bioctl,
++	.d_dump     = eno_dump,
++	.d_psize    = sweet_emmc_psize,
++	.d_type     = D_DISK,
++};
++
++static const struct cdevsw sweet_emmc_cdevsw = {
++	.d_open       = sweet_emmc_open,
++	.d_close      = sweet_emmc_close,
++	.d_read       = sweet_emmc_read,
++	.d_write      = sweet_emmc_write,
++	.d_ioctl      = sweet_emmc_cioctl,
++	.d_stop       = eno_stop,
++	.d_reset      = eno_reset,
++	.d_ttys       = NULL,
++	.d_select     = eno_select,
++	.d_mmap       = eno_mmap,
++	.d_strategy   = eno_strat,
++	.d_reserved_1 = eno_getc,
++	.d_reserved_2 = eno_putc,
++	.d_type       = D_DISK,
++};
++
++static int
++sweet_emmc_init(void)
++{
++	DTEntry node;
++	uintptr_t const *reg = NULL;
++	unsigned int size = 0;
++	char want[64] = "USERDATA";
++	uint32_t status = 0, nparts = 0;
++	uint64_t first = 0, last = 0;
++	int rc;
++
++	if (SecureDTLookupEntry(NULL, "/sweet-emmc", &node) != kSuccess ||
++	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
++	    size < 2 * sizeof(uintptr_t)) {
++		printf("SWEET EMMC: no /sweet-emmc node in the device tree\n");
++		return ENXIO;
++	}
++	PE_parse_boot_argn("emmcpart", want, sizeof(want));
++
++	vm_offset_t base = ml_io_map(reg[0], reg[1]);
++	if (!base) {
++		printf("SWEET EMMC: cannot map the host registers\n");
++		return ENOMEM;
++	}
++	dwmmc_init(&se.h, base);
++	printf("SWEET EMMC: host at %#llx, VERID %#x, FIFO port +%#x\n", (uint64_t)reg[0],
++	    dwmmc_reg(&se.h, DW_VERID), se.h.data_off);
++
++	lck_mtx_lock(&sweet_emmc_lock);
++	rc = dwmmc_card_status(&se.h, &status);
++	if (rc == DWMMC_ETIMEOUT) {
++		se.h.hold = 1;
++		rc = dwmmc_card_status(&se.h, &status);
++	}
++	if (!rc && ((status >> 9) & 0xf) == 3) {	/* stand-by: select the card */
++		rc = dwmmc_select(&se.h);
++	}
++	if (!rc) {
++		rc = gpt_find(&se.h, want, &first, &last, &nparts);
++	}
++	lck_mtx_unlock(&sweet_emmc_lock);
++	if (rc) {
++		printf("SWEET EMMC: card/GPT lookup of \"%s\" failed: %d (status %#x)\n", want, rc, status);
++		return rc == GPT_ENOTFOUND ? ENOENT : EIO;
++	}
++	se.first = first;
++	se.nsect = last - first + 1;
++	se.secsize = DEV_BSIZE;
++
++	se.bmajor = bdevsw_add(-1, &sweet_emmc_bdevsw);
++	if (se.bmajor < 0) {
++		return ENXIO;
++	}
++	se.cmajor = cdevsw_add_with_bdev(-1, &sweet_emmc_cdevsw, se.bmajor);
++	if (se.cmajor < 0) {
++		return ENXIO;
++	}
++	se.bdev = makedev(se.bmajor, 0);
++	devfs_make_node(se.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "emmcroot0");
++	devfs_make_node(makedev(se.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "remmcroot0");
++	se.ready = true;
++	printf("SWEET EMMC: \"%s\" first sector %llu, %llu MiB, read-only\n", want, first,
++	    se.nsect * SE_SECTOR >> 20);
++	return 0;
++}
++
++/* Root device for rd=emmcroot0 (IOFindBSDRoot). */
++int sweet_emmc_rootdev(dev_t *dev);
++
++int
++sweet_emmc_rootdev(dev_t *dev)
++{
++	if (!se.ready) {
++		int error = sweet_emmc_init();
++		if (error) {
++			return error;
++		}
++	}
++	*dev = se.bdev;
++	return 0;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */

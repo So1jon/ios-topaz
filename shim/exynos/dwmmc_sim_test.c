@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "dwmmc.h"
+#include "gpt.h"
 
 #define BASE	0x13540000u
 #define SECT	128			/* 64 KiB disk */
@@ -130,6 +131,27 @@ int main(void)
 	for (uint32_t i = 0; i < sizeof disk; i++)
 		disk[i] = (uint8_t)(i * 7 + (i >> 9));
 	memcpy(disk + 512, "EFI PART", 8);
+	{
+		/* GPT header fields at LBA 1: entries LBA 2, 128 entries x 128 bytes; three named partitions */
+		uint8_t *hd = disk + 512;
+		uint32_t nent = 128, esz = 128;
+		uint64_t elba = 2;
+		memcpy(hd + 80, &nent, 4);
+		memcpy(hd + 84, &esz, 4);
+		memcpy(hd + 72, &elba, 8);
+		memset(disk + 2 * 512, 0, 32 * 512);
+		static const struct { int idx; const char *name; uint64_t f, l; } parts[] = {
+			{ 0, "BOOTA0", 34, 63 }, { 5, "RECOVERY", 64, 99 }, { 40, "UserData", 100, 120 },
+		};
+		for (int i = 0; i < 3; i++) {
+			uint8_t *e = disk + 2 * 512 + parts[i].idx * 128;
+			memset(e, 0xa5, 16);	/* non-empty type GUID */
+			memcpy(e + 32, &parts[i].f, 8);
+			memcpy(e + 40, &parts[i].l, 8);
+			for (int c = 0; parts[i].name[c]; c++)
+				e[56 + c * 2] = (uint8_t)parts[i].name[c];
+		}
+	}
 
 	struct dwmmc h;
 	uint8_t buf[SECT * 512];
@@ -178,6 +200,32 @@ int main(void)
 	dwmmc_init(&h, BASE);
 	short_xfer = 1;
 	CHECK(dwmmc_read(&h, 0, 1, buf) == DWMMC_EDATA, "short transfer is reported");
+
+	reset();
+	dwmmc_init(&h, BASE);
+	{
+		uint64_t f = 0, l = 0;
+		uint32_t n = 0;
+		CHECK(gpt_find(&h, "RECOVERY", &f, &l, &n) == 0 && f == 64 && l == 99, "GPT: RECOVERY found with its LBA range");
+		CHECK(gpt_find(&h, "recovery", &f, &l, NULL) == 0 && f == 64, "GPT: name match is case-insensitive");
+		CHECK(gpt_find(&h, "USERDATA", &f, &l, &n) == 0 && f == 100 && l == 120 && n == 3, "GPT: USERDATA (entry 40) found, 3 entries seen");
+		CHECK(gpt_find(&h, "RECOVER", &f, &l, NULL) == GPT_ENOTFOUND, "GPT: a prefix is not a match");
+		CHECK(gpt_find(&h, "NOSUCH", &f, &l, &n) == GPT_ENOTFOUND && n == 3, "GPT: unknown name reports not found");
+		disk[512] = 'X';
+		CHECK(gpt_find(&h, "RECOVERY", &f, &l, NULL) == GPT_ENOGPT, "GPT: missing signature is reported");
+		disk[512] = 'E';
+		uint32_t bad = 64;
+		memcpy(disk + 512 + 84, &bad, 4);
+		CHECK(gpt_find(&h, "RECOVERY", &f, &l, NULL) == GPT_EBAD, "GPT: bad entry size is rejected");
+		bad = 128;
+		memcpy(disk + 512 + 84, &bad, 4);
+	}
+	no_card = 1;
+	{
+		uint64_t f, l;
+		CHECK(gpt_find(&h, "RECOVERY", &f, &l, NULL) == DWMMC_ETIMEOUT, "GPT: no card gives a timeout, not a hang");
+	}
+	no_card = 0;
 
 	reset();
 	dwmmc_init(&h, BASE);
