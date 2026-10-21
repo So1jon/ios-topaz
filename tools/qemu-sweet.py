@@ -154,6 +154,8 @@ def main():
     ap.add_argument('--hmp', action='append', default=[], help='extra monitor command run after stop (repeatable), e.g. "x /8gx 0xfffffe..."')
     ap.add_argument('--gic', default='3', help='QEMU virt gic-version (2 needs an ADT from mkadt.py --gicv2)')
     ap.add_argument('--disk', help='raw disk image attached as a legacy virtio-mmio block device (boot-arg rd=vblk0)')
+    ap.add_argument('--emmc', help='raw GPT disk (power-of-2 size) attached to the dw-mshc eMMC host at 0x09100000 (needs the patched QEMU, --qemu-bin; ADT built with SWEET_EMMC_PA=0x09100000)')
+    ap.add_argument('--qemu-bin', default=os.environ.get('SWEET_QEMU', 'qemu-system-aarch64'), help='QEMU binary (default $SWEET_QEMU or qemu-system-aarch64 from PATH)')
     ap.add_argument('--shim', help='boot this arm64 Image (shim + appended payload, shim/build-exynos.sh) with -kernel instead of the loader stub')
     ap.add_argument('--el2', action='store_true', help='with --shim: start the kernel at EL2 (virtualization=on) to test the EL2->EL1 drop')
     ap.add_argument('--cpu', default='cortex-a76')	# ARMv8.2 like Kryo 470, same ID_AA64MMFR0
@@ -196,7 +198,7 @@ def main():
     mem_size = struct.unpack_from('<Q', payload, 0x40)[0]
     ram_gib = max(4, -(-(phys_base + mem_size - 0x40000000) // (1 << 30)))
     machine = f'virt,gic-version={a.gic}' + (',virtualization=on' if a.el2 else '')
-    cmd = ['qemu-system-aarch64', '-M', machine, '-cpu', a.cpu, '-smp', '1', '-m', f'{ram_gib}G',
+    cmd = [a.qemu_bin, '-M', machine, '-cpu', a.cpu, '-smp', '1', '-m', f'{ram_gib}G',
            '-nographic', '-serial', f'file:{out}/serial.txt', '-qmp', f'unix:{mon},server,nowait',
            '-d', 'int,guest_errors,unimp', '-D', f'{out}/qemu.log', '-no-reboot']
     if a.shim:
@@ -209,6 +211,8 @@ def main():
         cmd += ['-global', 'virtio-mmio.force-legacy=true',
                 '-drive', f'file={os.path.abspath(a.disk)},if=none,format=raw,id=hd0,cache=unsafe',
                 '-device', 'virtio-blk-device,drive=hd0']
+    if a.emmc:
+        cmd += ['-drive', f'file={os.path.abspath(a.emmc)},if=sd,format=raw,cache=unsafe']
     if a.gdb:
         cmd += ['-S', '-gdb', 'tcp::1234']
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
