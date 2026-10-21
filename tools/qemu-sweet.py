@@ -152,6 +152,7 @@ def main():
     ap.add_argument('--secs', type=float, default=20)
     ap.add_argument('--gdb', action='store_true', help='start halted, gdb stub on :1234, no timeout')
     ap.add_argument('--hmp', action='append', default=[], help='extra monitor command run after stop (repeatable), e.g. "x /8gx 0xfffffe..."')
+    ap.add_argument('--gic', default='3', help='QEMU virt gic-version (2 needs an ADT from mkadt.py --gicv2)')
     ap.add_argument('--cpu', default='cortex-a76')	# ARMv8.2 like Kryo 470, same ID_AA64MMFR0
     ap.add_argument('--kernel', help='matching unstripped kernel, for exact framebuffer text decoding (uses llvm-nm)')
     ap.add_argument('--fail-on-panic', action='store_true', help='exit 2 for a visible panic, 3 for incomplete/blank decoding; requires --kernel')
@@ -181,7 +182,7 @@ def main():
     # virt RAM starts at 0x40000000: cover the payload's RAM (mkadt.py --highmem needs 8G).
     mem_size = struct.unpack_from('<Q', payload, 0x40)[0]
     ram_gib = max(4, -(-(phys_base + mem_size - 0x40000000) // (1 << 30)))
-    cmd = ['qemu-system-aarch64', '-M', 'virt,gic-version=3', '-cpu', a.cpu, '-smp', '1', '-m', f'{ram_gib}G',
+    cmd = ['qemu-system-aarch64', '-M', f'virt,gic-version={a.gic}', '-cpu', a.cpu, '-smp', '1', '-m', f'{ram_gib}G',
            '-nographic', '-serial', f'file:{out}/serial.txt', '-qmp', f'unix:{mon},server,nowait',
            '-d', 'int,guest_errors,unimp', '-D', f'{out}/qemu.log', '-no-reboot',
            '-device', f'loader,file={out}/ram.bin,addr={phys_base:#x},force-raw=on',

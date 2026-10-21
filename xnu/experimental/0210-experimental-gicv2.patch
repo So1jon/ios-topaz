@@ -1,0 +1,128 @@
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -42,6 +42,22 @@
+ 
+ #define HAS_GIC_V3                1
+ 
++/*
++ * EXPERIMENT: GICv2 / GIC-400 (Cortex-A53-only SoCs such as Exynos 7870).
++ * The ADT "gic" node reg is <GICD base, size, GICC base, size> (the second
++ * pair replaces the GICv3 redistributors). Interrupts are taken as IRQ.
++ */
++#define SWEET_GICV2               1
++#define GICV2_GICD_IGROUPR0       0x080
++#define GICV2_GICD_ISENABLER0     0x100
++#define GICV2_GICD_IPRIORITYR0    0x400
++#define GICV2_GICD_SGIR           0xF00
++#define GICV2_GICC_CTLR           0x00
++#define GICV2_GICC_PMR            0x04
++#define GICV2_GICC_BPR            0x08
++#define GICV2_GICC_IAR            0x0C
++#define GICV2_GICC_EOIR           0x10
++
+ #ifndef ASSEMBLER
+ #define PLATFORM_PANIC_LOG_DISABLED
+ #endif /* ! ASSEMBLER */
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -24,6 +24,11 @@
+ 
+ static vm_offset_t gicd_base;
+ static vm_offset_t gicr_base;
++#if defined(SWEET)
++/* GICv2: distributor and CPU interface bases, shared with sleh.c / SweetCPU.cpp */
++vm_offset_t sweet_gicd_base;
++vm_offset_t sweet_gicc_base;
++#endif
+ static vm_offset_t gicr_size;
+ 
+ static uint32_t
+@@ -143,6 +148,24 @@
+ 		gicr_size = gicr_size_prop;
+ 	}
+ 
++#if defined(SWEET)
++	sweet_gicd_base = gicd_base;
++	sweet_gicc_base = gicr_base;     /* second reg pair = GICv2 CPU interface */
++	if (SWEET_GICV2) {
++		/* Per-CPU banked SGI/PPI state, then this CPU's interface */
++		for (unsigned int i = 0; i < 32; i += 4) {
++			gicd_write32(GICV2_GICD_IPRIORITYR0 + i, 0xA0A0A0A0);
++		}
++		gicd_write32(GICV2_GICD_ISENABLER0, (1U << sweet_vtimer_intid) | (1U << SWEET_IPI_SGI));
++		_gic_write32(gicr_base + GICV2_GICC_PMR, 0xFF);
++		_gic_write32(gicr_base + GICV2_GICC_BPR, 0);
++		_gic_write32(gicr_base + GICV2_GICC_CTLR, 1);
++		gicd_write32(GICD_CTLR, 1);
++		__builtin_arm_dsb(DSB_SY);
++		return;
++	}
++#endif /* SWEET */
++
+ 	// Find the redistributor for this processor
+ 	vm_offset_t gicr_pe_base = find_gicr_pe_base();
+ 
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1939,8 +1939,9 @@
+ 	 * sweet: TrustZone owns GIC Group 0, so the timer and IPIs that other
+ 	 * ARM64 targets take as FIQs arrive here as Group 1 IRQs.
+ 	 */
+-	uint64_t iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
+-	uint32_t intid = (uint32_t)(iar & 0xFFFFFF);
++	extern vm_offset_t sweet_gicc_base;
++	uint64_t iar = *(volatile uint32_t *)(sweet_gicc_base + GICV2_GICC_IAR);
++	uint32_t intid = (uint32_t)(iar & 0x3FF);
+ 
+ 	if (intid >= 1020 && intid <= 1023) {
+ 		return; /* spurious */
+@@ -1951,11 +1952,11 @@
+ 		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
+ 		rtclock_intr(TRUE);
+ 		INTERRUPT_MASKED_DEBUG_END();
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		*(volatile uint32_t *)(sweet_gicc_base + GICV2_GICC_EOIR) = (uint32_t)iar;
+ 	} else if (intid < 16) {
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_IPI);
+ 		/* Ack before handling so an IPI raised meanwhile is not lost */
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		*(volatile uint32_t *)(sweet_gicc_base + GICV2_GICC_EOIR) = (uint32_t)iar;
+ 		__builtin_arm_isb(ISB_SY);
+ 		cpu_signal_handler();
+ 	} else {
+@@ -1966,7 +1967,7 @@
+ 			    cdp->interrupt_nub,
+ 			    intid);
+ 		}
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		*(volatile uint32_t *)(sweet_gicc_base + GICV2_GICC_EOIR) = (uint32_t)iar;
+ 	}
+ 	__builtin_arm_isb(ISB_SY);
+ #else
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -19,6 +19,7 @@
+ #include <pexpert/pexpert.h>
+ 
+ extern "C" void sweet_secondary_entry(void);
++extern "C" vm_offset_t sweet_gicd_base;   /* pexpert/arm/pe_fiq.c (GICv2 experiment) */
+ extern "C" boolean_t sweet_cpu_signal_is_enabled(unsigned int cpu);
+ 
+ class SweetCPU;
+@@ -228,8 +229,11 @@
+ 	    (((mpidr >> 16) & 0xff) << 32) |
+ 	    (((mpidr >> 8) & 0xff) << 16) |
+ 	    ((uint64_t)SWEET_IPI_SGI << 24) | (1ULL << aff0);
++	(void)sgi;
++	/* GICv2: target list = CPU interface bit (== CPU index), SGI id in [3:0] */
+ 	__builtin_arm_dsb(DSB_ISHST);
+-	__builtin_arm_wsr64("ICC_SGI1R_EL1", sgi);
++	*(volatile uint32_t *)(sweet_gicd_base + GICV2_GICD_SGIR) =
++	    ((1U << (aff0 & 7)) << 16) | SWEET_IPI_SGI;
+ 	__builtin_arm_isb(ISB_SY);
+ }
+ 

@@ -40,6 +40,8 @@ VTIMER_INTID = 19
 # QEMU virt (-M virt,gic-version=3 -cpu cortex-a76): GICD/GICR and the generic timer's CNTFRQ
 QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
 QEMU_VTIMER_INTID = 27
+# --gicv2 (QEMU virt gic-version=2): GICD stays 0x08000000, GICC at 0x08010000
+QEMU_GICC, QEMU_GICC_SIZE = 0x08010000, 0x10000
 
 BOOT_MANIFEST_HASH = hashlib.sha384(b'topaz boot manifest').digest()
 
@@ -76,11 +78,12 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
+def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, gicv2=False):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
     phys_base, mem_size = ((MID_PHYS_BASE, MID_MEM_SIZE) if midmem else
                            (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE))
     gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
+    gicc, gicc_size = QEMU_GICC, QEMU_GICC_SIZE   # gicv2: second reg pair = GICC (CPU interface)
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
@@ -160,10 +163,11 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
 
     gic = node('gic', [
         ph(),
-        ('compatible', cstr('arm,gic-v3')),
+        ('compatible', cstr('arm,gic-400' if gicv2 else 'arm,gic-v3')),
         ('interrupt-controller', b''),
         ('virtual-timer-intid', u32(QEMU_VTIMER_INTID if qemu else VTIMER_INTID)),
-        ('reg', u64(gicd - SOC_BASE, GICD_SIZE, gicr - SOC_BASE, GICR_SIZE)),
+        ('reg', u64(gicd - SOC_BASE, GICD_SIZE, gicc - SOC_BASE, gicc_size) if gicv2 else
+                    u64(gicd - SOC_BASE, GICD_SIZE, gicr - SOC_BASE, GICR_SIZE)),
     ])
     arm_io = node('arm-io', [
         ph(),
@@ -243,7 +247,8 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
 
 if __name__ == '__main__':
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
-                 native='--native' in sys.argv, midmem='--midmem' in sys.argv)
+                 native='--native' in sys.argv, midmem='--midmem' in sys.argv,
+                 gicv2='--gicv2' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
