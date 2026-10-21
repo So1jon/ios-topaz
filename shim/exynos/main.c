@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include "console.h"
 #include "loader.h"
+#include "probe.h"
 
 #define rsr(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " r : "=r"(_v)); _v; })
 
@@ -28,7 +29,7 @@ void *memset(void *d, int c, unsigned long n)
 }
 
 /* The stock Samsung bootloader leaves CNTFRQ_EL0 unset (see Linux exynos7870.dtsi): assume 26 MHz. */
-static void delay_ms(uint64_t ms)
+void delay_ms(uint64_t ms)
 {
 	uint64_t f = rsr("cntfrq_el0");
 	if (!f)
@@ -54,14 +55,23 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 void shim_main(uint64_t dtb, uint64_t entry_el)
 {
 	con_clear(BLUE);
+	#ifdef EXY_PROBE
+	con_str("SHIM", "exynos7870 probe (no write)");
+#else
 	con_str("SHIM", "exynos7870 xnu loader");
+#endif
 	con_hex2("ENTRY", "el=", (uint32_t)entry_el, "dtb=", (uint32_t)dtb);
 	con_hex2("MIDR", "el1=", (uint32_t)rsr("midr_el1"), "mpidr=", (uint32_t)rsr("mpidr_el1"));
 	con_hex2("TIMER", "frq=", (uint32_t)rsr("cntfrq_el0"), "sctlr=", (uint32_t)rsr("sctlr_el1"));
 	con_skip();
+#ifdef EXY_PROBE
+	/* read-only hardware probe: registers, card status, GPT. Nothing is written to storage. */
+	probe_run();
+#else
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	con_str("HALT", "see message above");
+#endif
 	delay_ms(600000);
 	for (;;)
 		__asm__ volatile("wfe");

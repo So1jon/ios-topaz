@@ -20,10 +20,17 @@ esac
 CF="--target=aarch64-none-elf -O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align \
 -fno-stack-protector -fno-jump-tables -fno-builtin -Wall -Wextra $FBDEF -I."
 clang $CF -c exynos/start.S -o $OUT/start.o
-for f in exynos/main.c console.c fdt.c loader.c; do
-	clang $CF -c "$f" -o "$OUT/$(basename "${f%.c}").o"
+# EXY_MODE=probe: read-only eMMC/GPT probe instead of loading XNU (nothing is written to storage)
+EXTRA=""
+OBJS="$OUT/start.o $OUT/main.o $OUT/console.o $OUT/fdt.o $OUT/loader.o"
+if [ "${EXY_MODE:-boot}" = probe ]; then
+	EXTRA="-DEXY_PROBE"
+	OBJS="$OBJS $OUT/probe.o $OUT/dwmmc.o"
+fi
+for f in exynos/main.c console.c fdt.c loader.c exynos/probe.c exynos/dwmmc.c; do
+	clang $CF $EXTRA -Iexynos -c "$f" -o "$OUT/$(basename "${f%.c}").o"
 done
-python3 -I ../tools/elflink.py $OUT/Image $OUT/start.o $OUT/main.o $OUT/console.o $OUT/fdt.o $OUT/loader.o
+python3 -I ../tools/elflink.py $OUT/Image $OBJS
 if [ -n "${1:-}" ]; then
 	size=$(stat -f %z $OUT/Image)
 	padded=$(( (size + 0xfff) & ~0xfff ))
@@ -34,6 +41,6 @@ fi
 if [ "${EXY_TARGET:-a6}" = a6 ]; then
 	# a bootloader may refuse a zero-size ramdisk: ship an empty newc cpio archive
 	(cd "$OUT" && rm -rf rd && mkdir rd && cd rd && find . | cpio -o -H newc --quiet 2>/dev/null | gzip -9 > ../ramdisk.bin)
-	python3 -I ../tools/mkbootimg_v0.py --kernel $OUT/Image --ramdisk $OUT/ramdisk.bin -o $OUT/boot.img --seandroid --cmdline "console=null"
+	python3 -I ../tools/mkbootimg_v0.py --kernel $OUT/Image --ramdisk $OUT/ramdisk.bin -o $OUT/${BOOTNAME:-boot}.img --seandroid --cmdline "console=null"
 fi
 ls -l $OUT/Image
