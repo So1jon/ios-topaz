@@ -154,6 +154,8 @@ def main():
     ap.add_argument('--hmp', action='append', default=[], help='extra monitor command run after stop (repeatable), e.g. "x /8gx 0xfffffe..."')
     ap.add_argument('--gic', default='3', help='QEMU virt gic-version (2 needs an ADT from mkadt.py --gicv2)')
     ap.add_argument('--disk', help='raw disk image attached as a legacy virtio-mmio block device (boot-arg rd=vblk0)')
+    ap.add_argument('--shim', help='boot this arm64 Image (shim + appended payload, shim/build-exynos.sh) with -kernel instead of the loader stub')
+    ap.add_argument('--el2', action='store_true', help='with --shim: start the kernel at EL2 (virtualization=on) to test the EL2->EL1 drop')
     ap.add_argument('--cpu', default='cortex-a76')	# ARMv8.2 like Kryo 470, same ID_AA64MMFR0
     ap.add_argument('--kernel', help='matching unstripped kernel, for exact framebuffer text decoding (uses llvm-nm)')
     ap.add_argument('--fail-on-panic', action='store_true', help='exit 2 for a visible panic, 3 for incomplete/blank decoding; requires --kernel')
@@ -172,16 +174,20 @@ def main():
     os.makedirs(a.outdir, exist_ok=True)
     out = os.path.abspath(a.outdir)
 
-    phys_base, img, ba_pa, entry_pa = build_image(payload)
-    # macOS read() fails above 2GB (QEMU's loader reads a file in one call): 1GB chunks
-    CH = 1 << 30
     chunks = []
-    for i in range(0, len(img), CH):
-        name = f'{out}/ram.{i // CH:03d}.bin'
-        open(name, 'wb').write(img[i:i + CH])
-        chunks.append((name, phys_base + i))
-    open(f'{out}/stub.bin', 'wb').write(stub(ba_pa, entry_pa))
-    print(f'phys_base={phys_base:#x} boot_args={ba_pa:#x} entry={entry_pa:#x}', file=sys.stderr)
+    if a.shim:
+        phys_base = struct.unpack_from('<Q', payload, 0x38)[0]
+        print(f'shim boot: phys_base={phys_base:#x}', file=sys.stderr)
+    else:
+        phys_base, img, ba_pa, entry_pa = build_image(payload)
+        # macOS read() fails above 2GB (QEMU's loader reads a file in one call): 1GB chunks
+        CH = 1 << 30
+        for i in range(0, len(img), CH):
+            name = f'{out}/ram.{i // CH:03d}.bin'
+            open(name, 'wb').write(img[i:i + CH])
+            chunks.append((name, phys_base + i))
+        open(f'{out}/stub.bin', 'wb').write(stub(ba_pa, entry_pa))
+        print(f'phys_base={phys_base:#x} boot_args={ba_pa:#x} entry={entry_pa:#x}', file=sys.stderr)
 
     mon = f'{out}/mon.sock'
     if os.path.exists(mon):
@@ -189,12 +195,16 @@ def main():
     # virt RAM starts at 0x40000000: cover the payload's RAM (mkadt.py --highmem needs 8G).
     mem_size = struct.unpack_from('<Q', payload, 0x40)[0]
     ram_gib = max(4, -(-(phys_base + mem_size - 0x40000000) // (1 << 30)))
-    cmd = ['qemu-system-aarch64', '-M', f'virt,gic-version={a.gic}', '-cpu', a.cpu, '-smp', '1', '-m', f'{ram_gib}G',
+    machine = f'virt,gic-version={a.gic}' + (',virtualization=on' if a.el2 else '')
+    cmd = ['qemu-system-aarch64', '-M', machine, '-cpu', a.cpu, '-smp', '1', '-m', f'{ram_gib}G',
            '-nographic', '-serial', f'file:{out}/serial.txt', '-qmp', f'unix:{mon},server,nowait',
-           '-d', 'int,guest_errors,unimp', '-D', f'{out}/qemu.log', '-no-reboot',
-           *[x for n, a_ in chunks for x in ('-device', f'loader,file={n},addr={a_:#x},force-raw=on')],
-           '-device', f'loader,file={out}/stub.bin,addr={STUB_PA:#x},force-raw=on',
-           '-device', f'loader,addr={STUB_PA:#x},cpu-num=0']
+           '-d', 'int,guest_errors,unimp', '-D', f'{out}/qemu.log', '-no-reboot']
+    if a.shim:
+        cmd += ['-kernel', os.path.abspath(a.shim)]
+    else:
+        cmd += [*[x for n, a_ in chunks for x in ('-device', f'loader,file={n},addr={a_:#x},force-raw=on')],
+                '-device', f'loader,file={out}/stub.bin,addr={STUB_PA:#x},force-raw=on',
+                '-device', f'loader,addr={STUB_PA:#x},cpu-num=0']
     if a.disk:
         cmd += ['-global', 'virtio-mmio.force-legacy=true',
                 '-drive', f'file={os.path.abspath(a.disk)},if=none,format=raw,id=hd0,cache=unsafe',
