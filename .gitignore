@@ -8,3 +8,6 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+
+# Exynos shim build outputs (rebuild with shim/build-exynos.sh; boot images are never committed)
+shim/out-exynos/
