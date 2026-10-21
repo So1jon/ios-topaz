@@ -51,7 +51,7 @@ def build_image(payload):
     ba += cmdline + b'\0' * 4 + struct.pack('<QQ', 0, mem_size)
     assert len(ba) == 736
     img[ba_pa - phys_base:ba_pa - phys_base + len(ba)] = ba
-    return phys_base, bytes(img), ba_pa, entry_va + delta
+    return phys_base, img, ba_pa, entry_va + delta   # bytearray: avoid a second multi-GB copy
 
 
 def stub(ba_pa, entry_pa):
@@ -153,6 +153,7 @@ def main():
     ap.add_argument('--gdb', action='store_true', help='start halted, gdb stub on :1234, no timeout')
     ap.add_argument('--hmp', action='append', default=[], help='extra monitor command run after stop (repeatable), e.g. "x /8gx 0xfffffe..."')
     ap.add_argument('--gic', default='3', help='QEMU virt gic-version (2 needs an ADT from mkadt.py --gicv2)')
+    ap.add_argument('--disk', help='raw disk image attached as a legacy virtio-mmio block device (boot-arg rd=vblk0)')
     ap.add_argument('--cpu', default='cortex-a76')	# ARMv8.2 like Kryo 470, same ID_AA64MMFR0
     ap.add_argument('--kernel', help='matching unstripped kernel, for exact framebuffer text decoding (uses llvm-nm)')
     ap.add_argument('--fail-on-panic', action='store_true', help='exit 2 for a visible panic, 3 for incomplete/blank decoding; requires --kernel')
@@ -172,7 +173,13 @@ def main():
     out = os.path.abspath(a.outdir)
 
     phys_base, img, ba_pa, entry_pa = build_image(payload)
-    open(f'{out}/ram.bin', 'wb').write(img)
+    # macOS read() fails above 2GB (QEMU's loader reads a file in one call): 1GB chunks
+    CH = 1 << 30
+    chunks = []
+    for i in range(0, len(img), CH):
+        name = f'{out}/ram.{i // CH:03d}.bin'
+        open(name, 'wb').write(img[i:i + CH])
+        chunks.append((name, phys_base + i))
     open(f'{out}/stub.bin', 'wb').write(stub(ba_pa, entry_pa))
     print(f'phys_base={phys_base:#x} boot_args={ba_pa:#x} entry={entry_pa:#x}', file=sys.stderr)
 
@@ -185,9 +192,13 @@ def main():
     cmd = ['qemu-system-aarch64', '-M', f'virt,gic-version={a.gic}', '-cpu', a.cpu, '-smp', '1', '-m', f'{ram_gib}G',
            '-nographic', '-serial', f'file:{out}/serial.txt', '-qmp', f'unix:{mon},server,nowait',
            '-d', 'int,guest_errors,unimp', '-D', f'{out}/qemu.log', '-no-reboot',
-           '-device', f'loader,file={out}/ram.bin,addr={phys_base:#x},force-raw=on',
+           *[x for n, a_ in chunks for x in ('-device', f'loader,file={n},addr={a_:#x},force-raw=on')],
            '-device', f'loader,file={out}/stub.bin,addr={STUB_PA:#x},force-raw=on',
            '-device', f'loader,addr={STUB_PA:#x},cpu-num=0']
+    if a.disk:
+        cmd += ['-global', 'virtio-mmio.force-legacy=true',
+                '-drive', f'file={os.path.abspath(a.disk)},if=none,format=raw,id=hd0,cache=unsafe',
+                '-device', 'virtio-blk-device,drive=hd0']
     if a.gdb:
         cmd += ['-S', '-gdb', 'tcp::1234']
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
@@ -214,8 +225,8 @@ def main():
         os.unlink(f'{out}/fb.raw')
     else:
         print(f'qemu exited early: {p.returncode}', file=sys.stderr)
-    for f in ('ram.bin',):
-        os.unlink(f'{out}/{f}')
+    for n, _ in chunks:
+        os.unlink(n)
     open(f'{out}/result.json', 'w').write(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result), file=sys.stderr)
     print(f'{out}/fb.png  {out}/regs.txt  {out}/qemu.log', file=sys.stderr)
