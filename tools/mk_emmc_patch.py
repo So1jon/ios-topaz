@@ -68,7 +68,8 @@ patch = ''
 patch += edit('bsd/conf/files', [(
     'bsd/dev/sweet_vblk.c\t\t\tstandard\n',
     'bsd/dev/sweet_vblk.c\t\t\tstandard\nbsd/dev/sweet_emmc.c\t\t\tstandard\n'
-    'bsd/dev/sweet_dwmmc.c\t\t\tstandard\nbsd/dev/sweet_gpt.c\t\t\tstandard\n')])
+    'bsd/dev/sweet_dwmmc.c\t\t\tstandard\nbsd/dev/sweet_gpt.c\t\t\tstandard\n'
+    'bsd/dev/sweet_cowovl.c\t\t\tstandard\n')])
 patch += edit('iokit/bsddev/IOKitBSDInit.cpp', [(
     '\tif (strcmp(rdBootVar, "vblk0") == 0) {\n',
     '''\tif (strcmp(rdBootVar, "emmcroot0") == 0) {
@@ -89,6 +90,8 @@ patch += newfile('bsd/dev/sweet_dwmmc.h', src('dwmmc.h'))
 patch += newfile('bsd/dev/sweet_dwmmc.c', src('dwmmc.c', [('#include "dwmmc.h"', '#include "sweet_dwmmc.h"')]))
 patch += newfile('bsd/dev/sweet_gpt.h', src('gpt.h', [('#include "dwmmc.h"', '#include "sweet_dwmmc.h"')]))
 patch += newfile('bsd/dev/sweet_gpt.c', src('gpt.c', [('#include "gpt.h"', '#include "sweet_gpt.h"')]))
+patch += newfile('bsd/dev/sweet_cowovl.h', src('cowovl.h'))
+patch += newfile('bsd/dev/sweet_cowovl.c', src('cowovl.c', [('#include "cowovl.h"', '#include "sweet_cowovl.h"')]))
 patch += newfile('bsd/dev/sweet_emmc.c', src('xnu_sweet_emmc.c'))
 open(out, 'w').write(patch)
 shutil.rmtree(work)
