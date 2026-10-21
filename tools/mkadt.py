@@ -187,7 +187,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, gicv
         ('compatible', cstr('arm,gic-400' if gicv2 else 'arm,gic-v3')),
         ('interrupt-controller', b''),
         ('virtual-timer-intid', u32(vtimer)),
-        ('reg', u64(gicd - SOC_BASE, GICD_SIZE, gicc - SOC_BASE, gicc_size) if gicv2 else
+        ('reg', u64(gicd - SOC_BASE, EXY_GICD_SIZE if exynos else GICD_SIZE, gicc - SOC_BASE, gicc_size) if gicv2 else
                     u64(gicd - SOC_BASE, GICD_SIZE, gicr - SOC_BASE, GICR_SIZE)),
     ])
     arm_io = node('arm-io', [
