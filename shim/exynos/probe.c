@@ -48,7 +48,22 @@ static int want(const char *n)
 	return 0;
 }
 
-void probe_run(void)
+#define WDT_BASE	0x10170000UL	/* watchdog@10170000, 30 s timeout in Samsung's dts */
+
+/* Print the watchdog control register; stop it if the bootloader left it running. */
+static void wdt_check(void)
+{
+	volatile uint32_t *w = (volatile uint32_t *)WDT_BASE;
+	uint32_t con = w[0];
+
+	con_hex2("WDT", "con=", con, "cnt=", w[2]);
+	if (con & 0x20) {			/* WTCON bit 5: watchdog enabled */
+		w[0] = con & ~0x21u;		/* disable it and its reset */
+		con_hex2("WDT", "off=", w[0], 0, 0);
+	}
+}
+
+void probe_run(uint64_t dtb)
 {
 	struct dwmmc h;
 	uint32_t st = 0;
@@ -56,7 +71,14 @@ void probe_run(void)
 
 	/* unmask SError: a bus error from a gated/absent controller then shows on screen instead of hanging */
 	__asm__ volatile("msr daifclr, #4" ::: "memory");
-	con_str("PROBE", "read-only eMMC probe");
+	con_str("PAGE 1", "dtb memory map (x0)");
+	fdt_dump_memory((uintptr_t)dtb);
+	con_str("STEP", "watchdog");
+	wdt_check();
+	con_str("WAIT", "15 s, then page 2");
+	delay_ms(15000);
+	con_clear(BLUE);
+	con_str("PAGE 2", "read-only eMMC probe");
 	con_str("STEP", "verid (first MMIO)");
 	dwmmc_init(&h, MMC0_BASE);
 	con_hex2("VERID", "ver=", dwmmc_reg(&h, DW_VERID), "hcon=", dwmmc_reg(&h, DW_HCON));
@@ -80,7 +102,7 @@ void probe_run(void)
 	con_hex2("CARD", "state=", (st >> 9) & 0xf, "hold=", h.hold);
 	if (((st >> 9) & 0xf) == 3) {
 		rc = dwmmc_select(&h);
-		con_hex2("CMD7", "rc=", (uint32_t)rc, "", 0);
+		con_hex2("CMD7", "rc=", (uint32_t)rc, 0, 0);
 	}
 	con_str("STEP", "read LBA 0 and 1");
 	rc = dwmmc_read(&h, 0, 1, sec);
@@ -104,7 +126,7 @@ void probe_run(void)
 	con_str("STEP", "partition table");
 	rc = dwmmc_read(&h, elba, 32, gpt);
 	if (rc) {
-		con_hex2("GPT", "rc=", (uint32_t)rc, "", 0);
+		con_hex2("GPT", "rc=", (uint32_t)rc, 0, 0);
 		return;
 	}
 	int used = 0, shown = 0;

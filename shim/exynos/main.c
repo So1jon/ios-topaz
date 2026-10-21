@@ -66,7 +66,7 @@ void shim_main(uint64_t dtb, uint64_t entry_el)
 	con_skip();
 #ifdef EXY_PROBE
 	/* read-only hardware probe: registers, card status, GPT. Nothing is written to storage. */
-	probe_run();
+	probe_run(dtb);
 #else
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);

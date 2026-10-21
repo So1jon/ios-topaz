@@ -16,7 +16,7 @@ def main():
     name = d[48:64].split(b'\0')[0].decode(errors='replace')
     cmd = d[64:576].split(b'\0')[0].decode(errors='replace')
     extra = d[608:1632].split(b'\0')[0].decode(errors='replace')
-    print(f'header/dt_size field : {ver:#x}  os_version {osv:#x}')
+    print(f'dt_size (header v0)  : {ver:#x}  os_version {osv:#x}')
     print(f'page size            : {page}')
     print(f'kernel               : size {ksz:#x} addr {kaddr:#x}')
     print(f'ramdisk              : size {rsz:#x} addr {raddr:#x}')
@@ -27,6 +27,18 @@ def main():
     base = kaddr - 0x8000
     print(f'implied base         : {base:#x} (if kernel_offset is 0x8000)  ramdisk_offset {raddr - base:#x}  tags_offset {taddr - base:#x}')
     print('SEANDROIDENFORCE     :', d.rstrip(b'\0').endswith(b'SEANDROIDENFORCE'))
+    if ver and ver < len(d):
+        pages = lambda n: -(-n // page) * page
+        dt_off = page + pages(ksz) + pages(rsz) + pages(ssz)
+        dt = d[dt_off:dt_off + ver]
+        if dt[:4] == b'DTBH':
+            n = struct.unpack_from('<I', dt, 8)[0]
+            print(f'dt section           : DTBH container at {dt_off:#x}, {n} DTBs')
+            for i in range(n):
+                chip, plat, sub, rmin, rmax, off, size, _ = struct.unpack_from('<8I', dt, 12 + 32 * i)
+                print(f'   chip {chip} platform {plat:#x} subtype {sub:#x} hw-rev {rmin}..{rmax:#x}  dtb {size:#x}@{off:#x}')
+        else:
+            print('dt section           : not a DTBH container', dt[:4])
     kimg = d[page:page + 64]
     if kimg[56:60] == b'ARM\x64':
         print('kernel is an arm64 Image, text_offset', struct.unpack_from('<Q', kimg, 8)[0])

@@ -25,9 +25,9 @@ EXTRA=""
 OBJS="$OUT/start.o $OUT/main.o $OUT/console.o $OUT/fdt.o $OUT/loader.o"
 if [ "${EXY_MODE:-boot}" = probe ]; then
 	EXTRA="-DEXY_PROBE"
-	OBJS="$OBJS $OUT/probe.o $OUT/dwmmc.o"
+	OBJS="$OBJS $OUT/probe.o $OUT/dwmmc.o $OUT/fdtdump.o"
 fi
-for f in exynos/main.c console.c fdt.c loader.c exynos/probe.c exynos/dwmmc.c; do
+for f in exynos/main.c console.c fdt.c loader.c exynos/probe.c exynos/dwmmc.c exynos/fdtdump.c; do
 	clang $CF $EXTRA -Iexynos -c "$f" -o "$OUT/$(basename "${f%.c}").o"
 done
 python3 -I ../tools/elflink.py $OUT/Image $OBJS
@@ -41,6 +41,12 @@ fi
 if [ "${EXY_TARGET:-a6}" = a6 ]; then
 	# a bootloader may refuse a zero-size ramdisk: ship an empty newc cpio archive
 	(cd "$OUT" && rm -rf rd && mkdir rd && cd rd && find . | cpio -o -H newc --quiet 2>/dev/null | gzip -9 > ../ramdisk.bin)
-	python3 -I ../tools/mkbootimg_v0.py --kernel $OUT/Image --ramdisk $OUT/ramdisk.bin -o $OUT/${BOOTNAME:-boot}.img --seandroid --cmdline "console=null"
+	# S-BOOT takes the DTB from the image's own dt section (Samsung DTBH container). The A6's stock one is
+	# public (A600FJXU9CVB1 dump boot/dt.img); keep it outside git and point A6_DT at it.
+	A6_DT=${A6_DT:-../../a6-artifacts/ref/dt.img}
+	[ -f "$A6_DT" ] || { echo "error: A6_DT ($A6_DT) not found: the boot image needs the A6 dt.img" >&2; exit 1; }
+	python3 -I ../tools/mkbootimg_v0.py --kernel $OUT/Image --ramdisk $OUT/ramdisk.bin --dt "$A6_DT" \
+		--name "${BOARD_NAME:-SRPRA24A008RU}" --os_version 0x14000162 \
+		-o $OUT/${BOOTNAME:-boot}.img --seandroid --cmdline "console=null"
 fi
 ls -l $OUT/Image

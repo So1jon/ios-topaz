@@ -44,15 +44,18 @@ QEMU_VTIMER_INTID = 27
 QEMU_GICC, QEMU_GICC_SIZE = 0x08010000, 0x10000
 # --exynos7870: Samsung Exynos 7870 (Galaxy A6/J6 ...). Values from mainline Linux
 # arch/arm64/boot/dts/exynos/exynos7870.dtsi and exynos7870-j6lte.dts. The DRAM bank and the
-# framebuffer are the J6 board's: NOT yet verified for the A6 (EXYBASE / EXYSIZE override DRAM).
+# framebuffer: Samsung's own A6 (a6lte, 3000MB) dts confirms bootloader_fb 0x67000000+0xA00000.
+# A6 DRAM: bank 0x40000000+0x3D800000 and 0x80000000+0x80000000, but carve-outs: tima 0x52A00000+2M, secure video/crypto
+# 0x80000000-0x89400000, ECT 0x90000000+0x14000, dram_init 0xEFFFF000, modem 0xF0000000+0x7800000, gnss 0xF7C00000+4M.
+# 0xA0000000..0xED000000 is clear of all of them (EXYBASE / EXYSIZE override).
 EXY_GICD, EXY_GICD_SIZE = 0x104e1000, 0x1000
 EXY_GICC, EXY_GICC_SIZE = 0x104e2000, 0x2000      # GIC-400 CPU interface is 8 KiB
 EXY_TIMEBASE = 26000000                            # stock bootloader leaves CNTFRQ_EL0 unset
 EXY_MPIDRS = (0x0, 0x1, 0x2, 0x3, 0x100, 0x101, 0x102, 0x103)   # two clusters of four A53
 EXY_FB, EXY_FB_W, EXY_FB_H = 0x67000000, 720, 1480
-EXY_FB_SIZE = (EXY_FB_W * EXY_FB_H * 4 + 0xffff) & ~0xffff
-EXY_DRAM_BASE = int(os.environ.get('EXYBASE', '0x80000000'), 16)
-EXY_DRAM_SIZE = int(os.environ.get('EXYSIZE', '0x40000000'), 16)   # 4K xnu needs <= ~1.25 GB
+EXY_FB_SIZE = 0xA00000      # bootloader_fb in Samsung's A6 dts: <0x67000000 0xA00000>
+EXY_DRAM_BASE = int(os.environ.get('EXYBASE', '0xa0000000'), 16)   # free of every A6 carve-out (see below)
+EXY_DRAM_SIZE = int(os.environ.get('EXYSIZE', '0x4d000000'), 16)   # 1.2 GB: 4K xnu needs <= ~1.25 GB
 
 BOOT_MANIFEST_HASH = hashlib.sha384(b'topaz boot manifest').digest()
 
